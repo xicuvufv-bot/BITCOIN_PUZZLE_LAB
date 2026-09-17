@@ -110,10 +110,8 @@ __device__ inline void point_neg(Point* o, const Point* p) {
 }
 
 __device__ void apply_endomorphism(Point* o, const Point* in) {
-    // x' = beta * x mod p
-    // y' = y, z = z
+    static const u64 BETA[4] = {0x497512F5,0x9CF04975,0x6E64479E,0x7AE96A2B};
     o->y = in->y; o->z = in->z; o->inf = in->inf;
-    // x' = beta * x (use fe_mul with ENDO_BETA constant)
     fe beta = {0x497512F5,0x9CF04975,0x6E64479E,0x7AE96A2B};
     fe_mul(&o->x, in->x, beta);
 }
@@ -129,18 +127,6 @@ __device__ void canonical_x(u64* out, const u64 x[4]) {
 
 /* ─────────────────────── DP Table (Checkpoint) ────────────────── */
 #define DP_HEADER_MAGIC 0x474C564B344E4701ULL
-
-struct __align__(64) DpHeader {
-    u64 magic; u64 version; std::atomic<u64> count; u64 capacity;
-    u64 dpbits; u64 puzzle_height; u64 flags; u64 seed;
-};
-
-struct __align__(64) DpRecord {
-    u64 canonX[4]; i64 d1[3]; i64 d2[3];
-    u32 tau; u32 sign; u32 kind; u32 next; u64 pad[2];
-};
-
-struct BucketHead { std::atomic<u32> head; };
 
 struct DpTable {
     DpHeader* header;
