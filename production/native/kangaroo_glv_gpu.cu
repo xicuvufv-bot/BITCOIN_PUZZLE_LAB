@@ -110,11 +110,10 @@ __device__ inline void point_neg(Point* o, const Point* p) {
 }
 
 __device__ void apply_endomorphism(Point* o, const Point* in) {
-    static const u64 BETA[4] = {0x497512F5,0x9CF04975,0x6E64479E,0x7AE96A2B};
-    // x' = beta * x mod p (using fe_mul with BETA)
+    // x' = beta * x mod p
     // y' = y, z = z
     o->y = in->y; o->z = in->z; o->inf = in->inf;
-    // x' = beta * x (use fe_mul with BETA constant)
+    // x' = beta * x (use fe_mul with ENDO_BETA constant)
     fe beta = {0x497512F5,0x9CF04975,0x6E64479E,0x7AE96A2B};
     fe_mul(&o->x, in->x, beta);
 }
@@ -265,7 +264,7 @@ static Options parse(int argc, char** argv) {
         if (a == "-test") o.test_mode = true;
         else if (a == "-benchmark") o.benchmark = true;
         else if (a == "-puzzle") o.puzzle = std::stoi(next("140"));
-        else if (a == "-gpu") { char* p = next("0"); char* e; for (;;) {
+        else if (a == "-gpu") { const char* p = next("0"); char* e; for (;;) {
             o.gpus.push_back(std::stoi(p)); if (!*e || *e != ',') break; p = e + 1; } }
         else if (a == "-checkpoint") o.ckpt = next("");
         else if (a == "-dpbits") o.dpbits = std::stoi(next("28"));
