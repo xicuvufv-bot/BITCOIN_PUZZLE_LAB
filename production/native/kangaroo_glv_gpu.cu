@@ -93,7 +93,6 @@ struct __align__(64) DpRecord {
 struct BucketHead { std::atomic<u32> head; };
 
 /* ─────────────────────── GLV Endomorphism & Negation ───────────────────── */
-struct __align__(32) fe { u64 w[4]; };
 struct __align__(32) Point { fe x, y, z; bool inf; };
 
 __device__ __host__ inline void fe_set_zero(fe* f) { f->w[0]=f->w[1]=f->w[2]=f->w[3]=0; }
@@ -110,9 +109,9 @@ __device__ inline void point_neg(Point* o, const Point* p) {
 }
 
 __device__ void apply_endomorphism(Point* o, const Point* in) {
-    static const u64 BETA[4] = {0x497512F5,0x9CF04975,0x6E64479E,0x7AE96A2B};
     o->y = in->y; o->z = in->z; o->inf = in->inf;
-    fe beta = {0x497512F5,0x9CF04975,0x6E64479E,0x7AE96A2B};
+    // Use ENDO_BETA constant from constant memory
+    fe beta = {ENDO_BETA[0], ENDO_BETA[1], ENDO_BETA[2], ENDO_BETA[3]};
     fe_mul(&o->x, in->x, beta);
 }
 
