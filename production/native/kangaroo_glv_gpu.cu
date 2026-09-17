@@ -4,7 +4,7 @@
  * Build: nvcc -O3 -arch=sm_86 -Xcompiler=/O2 -Xptxas -O3 -I. -std=c++17 -o kangaroo_glv_gpu kangaroo_glv_gpu.cu -lcudart
  * 
  * Run: ./kangaroo_glv_gpu -test                    # Sanity check (Puzzle #35)
- *      ./kangaroo_glv_gpu -puzzle 135 -checkpoint /content/drive/MyDrive/Kangaroo_Checkpoints/puzzle_135.work -dpbits 26 -budget 30
+ *      ./kangaroo_glv_gpu -p 135 -c /content/drive/MyDrive/Kangaroo_Checkpoints/puzzle_135.work -dpbits 26 -budget 30
  *      ./kangaroo_glv_gpu -benchmark               # Performance benchmark
  */
 
@@ -127,6 +127,65 @@ __device__ void canonical_x(u64* out, const u64 x[4]) {
 /* ─────────────────────── DP Table (Checkpoint) ────────────────── */
 #define DP_HEADER_MAGIC 0x474C564B344E4701ULL
 
+struct __align__(64) DpHeader {
+    u64 magic; u64 version; std::atomic<u64> count; u64 capacity;
+    u64 dpbits; u64 puzzle_height; u64 flags; u64 seed;
+};
+
+struct __align__(64) DpRecord {
+    u64 canonX[4]; i64 d1[3]; i64 d2[3];
+    u32 tau; u32 sign; u32 kind; u32 next; u64 pad[2];
+};
+
+struct BucketHead { std::atomic<u32> head; };
+
+/* ─────────────────────── GLV Endomorphism & Negation ───────────────────── */
+struct __align__(32) Point { fe x, y, z; bool inf; };
+
+__device__ __host__ inline void fe_set_zero(fe* f) { f->w[0]=f->w[1]=f->w[2]=f->w[3]=0; }
+__device__ __host__ inline void fe_set_one(fe* f) { f->w[0]=1; f->w[1]=f->w[2]=f->w[3]=0; }
+__device__ __host__ inline void fe_copy(fe* o, const fe& i) { o->w[0]=i.w[0]; o->w[1]=i.w[1]; o->w[2]=i.w[2]; o->w[3]=i.w[3]; }
+
+__device__ inline void fe_neg(fe* r, const fe& a) {
+    static const u64 P[4] = {0xFFFFFC2F,0xFFFFFFFF,0xFFFFFFFF,0xFFFFFFFF};
+    i64 b=0; for(int i=0;i<4;i++){ i64 d=-(i64)a.w[i]-b; r->w[i]=(u64)d; b=(d<0)?1:0; }
+}
+
+__device__ inline void point_neg(Point* o, const Point* p) {
+    o->x = p->x; fe_neg(&o->y, p->y); o->z = p->z; o->inf = p->inf;
+}
+
+__device__ void apply_endomorphism(Point* o, const Point* in) {
+    o->y = in->y; o->z = in->z; o->inf = in->inf;
+    // Use ENDO_BETA constant from constant memory
+    fe beta = {ENDO_BETA[0], ENDO_BETA[1], ENDO_BETA[2], ENDO_BETA[3]};
+    fe_mul(&o->x, in->x, beta);
+}
+
+__device__ void canonicalize(Point* p) {
+    // Negation symmetry: ensure y <= p/2 (canonical y)
+    // For DP key: use min(x, beta*x, beta^2*x)
+}
+
+__device__ void canonical_x(u64* out, const u64 x[4]) {
+    // canonX = min(x, beta*x, beta^2*x) mod p
+}
+
+/* ─────────────────────── DP Table (Checkpoint) ────────────────── */
+#define DP_HEADER_MAGIC 0x474C564B344E4701ULL
+
+struct __align__(64) DpHeader {
+    u64 magic; u64 version; std::atomic<u64> count; u64 capacity;
+    u64 dpbits; u64 puzzle_height; u64 flags; u64 seed;
+};
+
+struct __align__(64) DpRecord {
+    u64 canonX[4]; i64 d1[3]; i64 d2[3];
+    u32 tau; u32 sign; u32 kind; u32 next; u64 pad[2];
+};
+
+struct BucketHead { std::atomic<u32> head; };
+
 struct DpTable {
     DpHeader* header;
     DpRecord* records;
@@ -237,7 +296,51 @@ struct Options {
     u64 tames_per_gpu = 1u << 14;
     bool test_mode = false;
     bool benchmark = false;
+    u64 range_start[4] = {0};
+    u64 range_end[4] = {0};
+    bool has_custom_range = false;
 };
+
+static int parse_int(const char* s) { return (int)std::strtoll(s, nullptr, 0); }
+
+static void set_puzzle_range(int puzzle, u64 start[4], u64 end[4]) {
+    // Puzzle #p has range [2^(p-1), 2^p - 1]
+    if (puzzle >= 1 && puzzle <= 64) {
+        int bit = puzzle - 1;
+        for (int i = 0; i < 4; i++) start[i] = 0;
+        start[bit / 64] = 1ULL << (bit % 64);
+        
+        for (int i = 0; i < 4; i++) end[i] = ~0ULL;
+        end[0] = (1ULL << puzzle) - 1;
+        for (int i = 1; i < 4; i++) end[i] = 0;
+    } else if (puzzle <= 128) {
+        // For puzzles 65-128
+        int high_bits = puzzle - 64;
+        for (int i = 0; i < 4; i++) start[i] = 0;
+        start[1] = 1ULL << (high_bits - 1);
+        
+        for (int i = 0; i < 4; i++) end[i] = ~0ULL;
+        if (high_bits == 64) {
+            end[1] = ~0ULL;
+        } else {
+            end[1] = (1ULL << high_bits) - 1;
+        }
+        end[0] = ~0ULL;
+    } else {
+        // For puzzles 129-160
+        int high_bits = puzzle - 128;
+        for (int i = 0; i < 4; i++) start[i] = 0;
+        start[2] = 1ULL << (high_bits - 1);
+        
+        for (int i = 0; i < 4; i++) end[i] = ~0ULL;
+        if (high_bits == 64) {
+            end[2] = ~0ULL;
+        } else {
+            end[2] = (1ULL << high_bits) - 1;
+        }
+        end[0] = end[1] = ~0ULL;
+    }
+}
 
 static int parse_int(const char* s) { return (int)std::strtoll(s, nullptr, 0); }
 
@@ -245,13 +348,15 @@ static Options parse(int argc, char** argv) {
     Options o;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
-        auto next = [&](const char* def) { return (i + 1 < argc) ? argv[++i] : def; };
+        auto next = [&](const char* def) -> const char* { 
+            return (i + 1 < argc) ? argv[++i] : def; 
+        };
         if (a == "-test") o.test_mode = true;
         else if (a == "-benchmark") o.benchmark = true;
-        else if (a == "-puzzle") o.puzzle = std::stoi(next("140"));
+        else if (a == "-p" || a == "-puzzle") o.puzzle = std::stoi(next("140"));
         else if (a == "-gpu") { const char* p = next("0"); char* e; for (;;) {
             o.gpus.push_back(std::stoi(p)); if (!*e || *e != ',') break; p = e + 1; } }
-        else if (a == "-checkpoint") o.ckpt = next("");
+        else if (a == "-c" || a == "-checkpoint") o.ckpt = next("");
         else if (a == "-dpbits") o.dpbits = std::stoi(next("28"));
         else if (a == "-budget") o.budget_log2 = std::stoi(next("34"));
         else if (a == "-sleep") o.sleep_s = std::stoi(next("60"));
@@ -263,7 +368,29 @@ static Options parse(int argc, char** argv) {
 int main(int argc, char** argv) {
     Options o = parse(argc, argv);
     
-    cudaSetDevice(0);
+    // Set puzzle range based on puzzle number
+    set_puzzle_range(o.puzzle, o.range_start, o.range_end);
+    o.has_custom_range = true;
+    
+    // Initialize CUDA - get device count first
+    int gpu_count = 0;
+    cudaError_t err = cudaGetDeviceCount(&gpu_count);
+    if (err != cudaSuccess || gpu_count == 0) {
+        fprintf(stderr, "❌ No CUDA devices found! Error: %s\n", cudaGetErrorString(err));
+        return 1;
+    }
+    
+    printf("🖥️  Found %d CUDA device(s)\n", gpu_count);
+    
+    // Use first GPU by default, or first from -gpu list
+    int target_gpu = 0;
+    if (!o.gpus.empty() && o.gpus[0] < gpu_count) {
+        target_gpu = o.gpus[0];
+    } else if (o.gpus.size() == 1 && o.gpus[0] == 0) {
+        target_gpu = 0;
+    }
+    
+    CHECK_CUDA(cudaSetDevice(target_gpu));
     cudaDeviceSetCacheConfig(cudaFuncCachePreferL1);
     
     printf("╔════════════════════════════════════════════════════════════╗\n");
@@ -272,6 +399,7 @@ int main(int argc, char** argv) {
     printf("╚════════════════════════════════════════════════════════════╝\n\n");
     
     // SANITY TEST MODE
+    Options o = parse(argc, argv);
     if (o.test_mode) {
         printf("\n🧪 SANITY TEST MODE\n");
         bool ok = run_sanity_test();
@@ -289,15 +417,33 @@ int main(int argc, char** argv) {
         return 0;
     }
     
+    // Set puzzle range again after parsing (in case -p was used)
+    set_puzzle_range(o.puzzle, o.range_start, o.range_end);
+    o.has_custom_range = true;
+    
     printf("\n🎯 Target: Puzzle #%d\n", o.puzzle);
-    printf("🖥️  GPUs: "); for (size_t i=0;i<o.gpus.size();i++) printf("%s%d",i?",":"",o.gpus[i]);
-    printf("  dpbits=%d  budget=2^%d\n", o.dpbits, o.budget_log2);
+    printf("📍 Range: [2^%d, 2^%d - 1]\n", o.puzzle - 1, o.puzzle);
+    printf("🖥️  GPU: %d (of %d available)\n", target_gpu, gpu_count);
+    printf("📊 dpbits=%d  budget=2^%d\n", o.dpbits, o.budget_log2);
+    if (!o.ckpt.empty()) {
+        printf("💾 Checkpoint: %s\n", o.ckpt.c_str());
+    }
     
     // Initialize checkpoint system
     DpTable dp_table;
     CheckpointManager ckpt_mgr;
     
-    // Initialize & load checkpoint (auto-detect Drive)
+    // Override checkpoint path if provided via -c
+    if (!o.ckpt.empty()) {
+        ckpt_mgr.drive_path = "";
+        ckpt_mgr.local_path = "";
+        ckpt_mgr.filename = o.ckpt;
+        // Ensure parent directory exists
+        std::filesystem::path ckpt_path(o.ckpt);
+        std::filesystem::create_directories(ckpt_path.parent_path());
+    }
+    
+    // Initialize & load checkpoint (auto-detect Drive if no custom path)
     if (!ckpt_mgr.init(&dp_table)) {
         fprintf(stderr, "Failed to initialize checkpoint\n");
         return 1;
@@ -307,7 +453,8 @@ int main(int argc, char** argv) {
     ckpt_mgr.start_sync();
     
     printf("\n✅ Framework ready. Launch with actual GPU kernel.\n");
-    printf("Run with: ./kangaroo_glv_gpu -puzzle %d -gpu 0 -checkpoint %s -dpbits 26 -budget 30\n", o.puzzle, ckpt_mgr.get_path().c_str());
+    printf("Run with: ./kangaroo_glv_gpu -p %d -c %s -dpbits %d -budget %d\n", 
+           o.puzzle, o.ckpt.empty() ? "auto" : o.ckpt.c_str(), o.dpbits, o.budget_log2);
     
     return 0;
 }
